@@ -10,7 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: dispatch
-        run: curl -fsS -m 60 -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" "${{ secrets.APP_URL }}/api/cron/dispatch"
+        run: >-
+          curl -fsS -m 60
+          -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+          "${{ secrets.APP_URL }}/api/cron/dispatch"
       - name: care
         if: github.event.schedule == '7 * * * *' || github.event_name == 'workflow_dispatch'
-        run: curl -fsS -m 60 -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" "${{ secrets.APP_URL }}/api/cron/care"
+        run: >-
+          curl -fsS -m 60
+          -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+          "${{ secrets.APP_URL }}/api/cron/care"
