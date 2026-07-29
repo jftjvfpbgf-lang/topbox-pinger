@@ -1,22 +1,77 @@
 name: TopBox cron
+
+# GitHub sheds scheduled runs under queue load, and it sheds high-frequency ones
+# hardest: a "*/5" dispatch cron measured a 61-minute median gap (worst 2h21m) over
+# its first week, delivering ~8% of intended runs. So we ask for one trigger an hour
+# and cover the hour ourselves with a sleep loop, which only needs a single trigger
+# to land instead of twelve.
 on:
   schedule:
-    - cron: "*/5 * * * *" # survey dispatch
-    - cron: "7 * * * *"   # care: morning report, escalations, nudges (offset from :00 — GitHub is congested on the hour)
+    - cron: "7 * * * *" # offset from :00 — GitHub is most congested on the hour
   workflow_dispatch: {}
+
+# Never let two loops overlap. dispatch selects status:"scheduled" rows and only then
+# marks them "sending", so two *simultaneous* invocations can both claim the same send
+# and double-text a customer. Queueing (rather than cancel-in-progress) keeps at most
+# one loop running: GitHub holds a single pending run per group and a newer pending run
+# replaces the older one. Cancelling would be worse than queueing here — it kills the
+# curl client but not the serverless function already running on the other end.
+concurrency:
+  group: topbox-cron
+  cancel-in-progress: false
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 70 # the loop below runs ~57 min
+    env:
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      APP_URL: ${{ secrets.APP_URL }}
     steps:
-      - name: dispatch
-        run: >-
-          curl -fsS -m 60
-          -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
-          "${{ secrets.APP_URL }}/api/cron/dispatch"
-      - name: care
-        if: github.event.schedule == '7 * * * *' || github.event_name == 'workflow_dispatch'
-        run: >-
-          curl -fsS -m 60
-          -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
-          "${{ secrets.APP_URL }}/api/cron/care"
+      # Both routes are safe to call repeatedly — every side effect is behind a
+      # persisted once-only marker (digestLastSentAt / remindedAt / nudgedAt, and
+      # dispatch's status transitions), so care rides the same 5-minute tick as
+      # dispatch instead of running once an hour. That buys real freshness: the
+      # morning report lands within 5 min of 9:00 dealer-local rather than at :07
+      # of whichever hour happened to survive shedding, stale-alert escalations
+      # and 48h nudges fire within 5 min of their thresholds, and a transient
+      # Twilio error self-heals on the next tick instead of an hour later.
+      - name: care + dispatch every 5 min for the hour
+        run: |
+          hit() { # $1 = route name
+            curl -fsS -m 60 --retry 2 --retry-delay 5 \
+              -H "Authorization: Bearer $CRON_SECRET" \
+              "$APP_URL/api/cron/$1"
+          }
+
+          care_failed=0
+          dispatch_failed=0
+          for i in $(seq 1 12); do
+            echo "--- tick $i/12 · $(date -u '+%H:%M:%SZ') ---"
+
+            # response bodies carry the useful counters (digests/escalations/nudges,
+            # sent/failed/suppressed/deferred) — worth having in the run log
+            if out=$(hit care); then
+              echo "care     $out"
+            else
+              echo "::warning::care failed on tick $i/12"
+              care_failed=$((care_failed + 1))
+            fi
+
+            if out=$(hit dispatch); then
+              echo "dispatch $out"
+            else
+              echo "::warning::dispatch failed on tick $i/12"
+              dispatch_failed=$((dispatch_failed + 1))
+            fi
+
+            if [ "$i" -lt 12 ]; then sleep 300; fi
+          done
+
+          echo "care $((12 - care_failed))/12 ok · dispatch $((12 - dispatch_failed))/12 ok"
+          # A blip shouldn't cost the rest of the hour, but the run must not go green
+          # if a route was actually broken. --retry already absorbed the transients.
+          if [ "$((care_failed + dispatch_failed))" -ne 0 ]; then
+            echo "::error::care failed ${care_failed}×, dispatch failed ${dispatch_failed}×"
+            exit 1
+          fi
