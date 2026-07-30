@@ -71,9 +71,10 @@ pauses until one lands — which is strictly better than double-texting a custom
   transient 5xx and timeouts first.
 - Response bodies are echoed into the run log, so each tick shows real counters
   (`digests`/`escalations`/`nudges`, `sent`/`failed`/`suppressed`/`deferred`).
-- `care` has no per-org `try`/`catch` — one throwing `sendSms` 500s the whole handler
-  and skips the orgs after it. The 5-minute cadence softens that from an hour-long
-  outage to one tick, but it's worth fixing in the `topbox` repo.
+- `care` returns a `failures[]` array for work it could not deliver, and retries it on
+  the next tick. Neither `sendSms` nor `sendPushToOrg` throws — both report failure in
+  their return value — so a Twilio outage shows up there rather than as a 500. Only
+  infrastructure trouble (a dead database) still 500s and reddens the run.
 - If Actions still isn't tight enough, the durable fix is to move scheduling off it —
   Cloudflare Workers cron or cron-job.org are purpose-built, free at this volume, and
   support auth headers. That trades this repo's simplicity for a second place to hold
