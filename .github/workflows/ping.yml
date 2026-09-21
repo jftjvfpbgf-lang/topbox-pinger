@@ -8,7 +8,12 @@ name: TopBox cron
 on:
   schedule:
     - cron: "7 * * * *" # offset from :00 — GitHub is most congested on the hour
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      ticks:
+        description: "How many 5-minute ticks to run (1 = a single probe of both routes)"
+        default: "12"
+        required: false
 
 # Never let two loops overlap. dispatch selects status:"scheduled" rows and only then
 # marks them "sending", so two *simultaneous* invocations can both claim the same send
@@ -44,31 +49,32 @@ jobs:
               "$APP_URL/api/cron/$1"
           }
 
+          TICKS="${{ github.event.inputs.ticks || '12' }}"
           care_failed=0
           dispatch_failed=0
-          for i in $(seq 1 12); do
-            echo "--- tick $i/12 · $(date -u '+%H:%M:%SZ') ---"
+          for i in $(seq 1 "$TICKS"); do
+            echo "--- tick $i/$TICKS · $(date -u '+%H:%M:%SZ') ---"
 
             # response bodies carry the useful counters (digests/escalations/nudges,
             # sent/failed/suppressed/deferred) — worth having in the run log
             if out=$(hit care); then
               echo "care     $out"
             else
-              echo "::warning::care failed on tick $i/12"
+              echo "::warning::care failed on tick $i/$TICKS"
               care_failed=$((care_failed + 1))
             fi
 
             if out=$(hit dispatch); then
               echo "dispatch $out"
             else
-              echo "::warning::dispatch failed on tick $i/12"
+              echo "::warning::dispatch failed on tick $i/$TICKS"
               dispatch_failed=$((dispatch_failed + 1))
             fi
 
-            if [ "$i" -lt 12 ]; then sleep 300; fi
+            if [ "$i" -lt "$TICKS" ]; then sleep 300; fi
           done
 
-          echo "care $((12 - care_failed))/12 ok · dispatch $((12 - dispatch_failed))/12 ok"
+          echo "care $((TICKS - care_failed))/$TICKS ok · dispatch $((TICKS - dispatch_failed))/$TICKS ok"
           # A blip shouldn't cost the rest of the hour, but the run must not go green
           # if a route was actually broken. --retry already absorbed the transients.
           if [ "$((care_failed + dispatch_failed))" -ne 0 ]; then
